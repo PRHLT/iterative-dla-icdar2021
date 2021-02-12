@@ -20,8 +20,9 @@ if [ $# -eq 0 ]; then
   echo "Options:"
   echo " -s Stage: [0: Data preparation,"
   echo "            1: P2PaLA configuration,"
-  echo "            2: Training initial model,"
-  echo "            3: Iterative training loop]"
+  echo "            2: Training touchstone model,"
+  echo "            3: Training oracle model,"
+  echo "            4: Iterative training loop]"
   echo " -u Unique stage: $unique_stage"
   echo " -p Path to P2PaLA: $P2PaLA_PATH"
   echo " -o Path to OHG: $OHG_PATH"
@@ -209,10 +210,10 @@ EOF
   fi
 fi
 
-# Train the initial P2PaLA model
+# Train the touchstone P2PaLA model
 if [ $stage -le 2 ]; then
   echo "########################################"
-  echo "# Training the initial model"
+  echo "# Training the touchstone model"
   echo "########################################"
 
   [ ! -d logs ] && mkdir logs 
@@ -221,7 +222,9 @@ if [ $stage -le 2 ]; then
   [ -d data_"${corpus}"/iter_prod ] && rm -r data_"${corpus}"/iter_prod
   cp -r data_"${corpus}"/production data_"${corpus}"/iter_prod/
 
-  [ -d work_"${corpus}" ] && rm -r work_"${corpus}"
+  work=work_"${corpus}"_touchstone
+  [ -d "$work" ] && rm -r "$work"
+
 
   iteration=0
   echo "Training pages: $(find ./data_"${corpus}"/iter_train/ -maxdepth 1 -name '*.tif' -o -name '*jpg' | wc -l)" | tee logs/"${corpus}"_iterative_train_"${iteration}".log
@@ -229,22 +232,23 @@ if [ $stage -le 2 ]; then
 
   python3.7 "${P2PaLA_PATH}"/P2PaLA.py \
     --config conf/P2PaLA_"${corpus}".conf \
+    --work_dir "${work}" \
     --log_comment "${corpus}_iterative_train_${iteration}" 2>> logs/"${corpus}"_iterative_train_"${iteration}".log
 
-  cp work_"${corpus}"/results/test/adversarial_prob{,_"${iteration}"}.csv
-  cp work_"${corpus}"/results/prod/adversarial_prob{,_"${iteration}"}.csv
-  rm work_"${corpus}"/checkpoints/checkpoint.pth
+  cp "${work}"/results/test/adversarial_prob{,_"${iteration}"}.csv
+  cp "${work}"/results/prod/adversarial_prob{,_"${iteration}"}.csv
+  rm "${work}"/checkpoints/checkpoint.pth
 
   # Get results for test set
   find data_"${corpus}"/test/page -name "*xml" > /tmp/ref
-  find work_"${corpus}"/results/test/page -name "*xml" > /tmp/hyp
+  find "${work}"/results/test/page -name "*xml" > /tmp/hyp
   python3.7 "${P2PaLA_PATH}"/evalTools/page2page_eval.py \
     --target_list /tmp/ref \
     --hyp_list /tmp/hyp 2>> logs/"${corpus}"_iterative_train_"${iteration}".log
 
   # Get results for the production set
   find data_"${corpus}"/iter_prod/page -name "*xml" > /tmp/ref
-  find work_"${corpus}"/results/prod/page -name "*xml" > /tmp/hyp
+  find "${work}"/results/prod/page -name "*xml" > /tmp/hyp
   python3.7 "${P2PaLA_PATH}"/evalTools/page2page_eval.py \
     --target_list /tmp/ref \
       --hyp_list /tmp/hyp 2>> logs/"${corpus}"_iterative_train_"${iteration}".log
@@ -254,23 +258,70 @@ if [ $stage -le 2 ]; then
   fi
 fi
 
-# Iterative train P2PaLA models: supervised / unsupervised
+# Train the oracle P2PaLA model
 if [ $stage -le 3 ]; then
+  echo "########################################"
+  echo "# Training the oracle model"
+  echo "########################################"
+
+  [ ! -d logs ] && mkdir logs 
+  [ -d data_"${corpus}"/iter_train ] && rm -r data_"${corpus}"/iter_train
+  cp -r data_"${corpus}"/train data_"${corpus}"/iter_train/
+  cp -r data_"${corpus}"/production/* data_"${corpus}"/iter_train/
+  [ -d data_"${corpus}"/iter_prod ] && rm -r data_"${corpus}"/iter_prod
+  cp -r data_"${corpus}"/production data_"${corpus}"/iter_prod/
+
+  work=work_"${corpus}"_oracle
+  [ -d $work ] && rm -r $work
+
+  iteration=-1
+  echo "Training pages: $(find ./data_"${corpus}"/iter_train/ -maxdepth 1 -name '*.tif' -o -name '*jpg' | wc -l)" | tee logs/"${corpus}"_iterative_train_"${iteration}".log
+  echo "Confidence threshold: $threshold" | tee -a logs/"${corpus}"_iterative_train_"${iteration}".log
+
+  python3.7 "${P2PaLA_PATH}"/P2PaLA.py \
+    --config conf/P2PaLA_"${corpus}".conf \
+    --work_dir "${work}" \
+    --log_comment "${corpus}_iterative_train_${iteration}" 2>> logs/"${corpus}"_iterative_train_"${iteration}".log
+
+  cp "${work}"/results/test/adversarial_prob{,_"${iteration}"}.csv
+  cp "${work}"/results/prod/adversarial_prob{,_"${iteration}"}.csv
+  rm "${work}"/checkpoints/checkpoint.pth
+
+  # Get results for test set
+  find data_"${corpus}"/test/page -name "*xml" > /tmp/ref
+  find "${work}"/results/test/page -name "*xml" > /tmp/hyp
+  python3.7 "${P2PaLA_PATH}"/evalTools/page2page_eval.py \
+    --target_list /tmp/ref \
+    --hyp_list /tmp/hyp 2>> logs/"${corpus}"_iterative_train_"${iteration}".log
+
+  # Get results for the production set
+  find data_"${corpus}"/iter_prod/page -name "*xml" > /tmp/ref
+  find "${work}"/results/prod/page -name "*xml" > /tmp/hyp
+  python3.7 "${P2PaLA_PATH}"/evalTools/page2page_eval.py \
+    --target_list /tmp/ref \
+      --hyp_list /tmp/hyp 2>> logs/"${corpus}"_iterative_train_"${iteration}".log
+
+  if [ "$unique_stage" == "true" ]; then
+    exit 0
+  fi
+fi
+# Iterative train P2PaLA models: supervised / unsupervised
+if [ $stage -le 4 ]; then
   echo "########################################"
   echo "# Iterative training"
   echo "########################################"
 
   [ ! -d logs ] && mkdir logs
+  work=work_"${corpus}"_"${mode}"_"${selection}"
+
   if [ $iteration -le 1 ]; then
     [ -d data_"${corpus}"/iter_train ] && rm -r data_"${corpus}"/iter_train
     cp -r data_"${corpus}"/train data_"${corpus}"/iter_train/
     [ -d data_"${corpus}"/iter_prod ] && rm -r data_"${corpus}"/iter_prod
     cp -r data_"${corpus}"/production data_"${corpus}"/iter_prod/
-    [ -d work_"${corpus}"_"${mode}"_"${selection}" ] && rm -r work_"${corpus}"_"${mode}"_"${selection}"
-    cp -r work_"${corpus}" work_"${corpus}"_"${mode}"_"${selection}"
+    [ -d "$work" ] && rm -r "$work"
+    cp -r work_"${corpus}"_touchstone "$work"
   fi
-
-  work=work_"${corpus}"_"${mode}"_"${selection}"
 
   for iteration in $(seq $iteration $max_iterations); do
     echo "########################################"
@@ -278,7 +329,7 @@ if [ $stage -le 3 ]; then
     echo "########################################"
 
     log=logs/"${corpus}"_"${mode}"_"${selection}"_iterative_train_"${iteration}".log
-    [ -f $log ] && rm $log
+    [ -f "$log" ] && rm "$log"
 
     case "${selection}" in
       "most")
